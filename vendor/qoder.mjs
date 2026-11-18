@@ -882,6 +882,19 @@ async function* events(body) {
   const a = new Splitter()
   let index = -1 // the tool call being given
   let native = -1 // the native tool call being assembled
+  let nativeID = "" // its id, to tell a restarted numbering from its own deltas
+  let nativeArgs = "" // what it has been given so far
+  // whole reports an arguments text that already is one complete object: more
+  // arriving after it belong to another call, not to this one
+  const whole = (s) => {
+    if (!/^\s*\{/.test(s)) return false
+    try {
+      JSON.parse(s)
+      return true
+    } catch {
+      return false
+    }
+  }
   const flushed = function* () {
     for (const f of a.flush()) if (f.text) yield { text: f.text }
   }
@@ -918,12 +931,23 @@ async function* events(body) {
     // tool calls served the OpenAI way keep Qoder's id: a result answers it
     for (const tc of delta.tool_calls ?? []) {
       const i = Number(tc.index ?? 0)
-      if (i !== native) {
+      const args = tc.function?.arguments
+      // Some upstreams number every parallel call from the start again, or
+      // put the next call's arguments on the index still being assembled.
+      // Either way the next call is a new one: appending its arguments to the
+      // one before would hand the client "{...}{...}", which no JSON reader
+      // takes.
+      if (i !== native || (tc.id && nativeID && tc.id !== nativeID) || (args && whole(nativeArgs))) {
         native = i
+        nativeID = tc.id || "call_" + hexID()
+        nativeArgs = args ?? ""
         yield* flushed()
         a.sawTool = true
-        yield { tool: { index: ++index, id: tc.id || "call_" + hexID(), name: tc.function?.name ?? "", args: tc.function?.arguments ?? "" } }
-      } else if (tc.function?.arguments) yield { args: { index, text: tc.function.arguments } }
+        yield { tool: { index: ++index, id: nativeID, name: tc.function?.name ?? "", args: nativeArgs } }
+      } else if (args) {
+        nativeArgs += args
+        yield { args: { index, text: args } }
+      }
     }
     fr = chunk?.choices?.[0]?.finish_reason || fr
     // the usage comes in a chunk of its own after the finish, with no
